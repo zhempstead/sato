@@ -140,6 +140,7 @@ if fixed_sherlock_params:
 
 label_enc = LabelEncoder()
 label_enc.fit(valid_types)
+import pdb; pdb.set_trace()
 
 # initialize with co-coccur matrix     
 if init_matrix_path is None:
@@ -268,18 +269,35 @@ for corpus in corpus_list:
                                             id_filter=None,
                                             max_col_count=MAX_COL_COUNT)
 
-    if args.mode!='eval':
-        train = copy.copy(whole_corpus).set_filter(train_ids)
-        train_list.append(train)
+    train = copy.copy(whole_corpus).set_filter(train_ids)
+    train_list.append(train)
 
     test = copy.copy(whole_corpus).set_filter(test_ids)
     test_list.append(test)
 
-if args.mode!='eval':
-    training_data = ConcatDataset(train_list)
+training_data = ConcatDataset(train_list)
 
 testing_data = ConcatDataset(test_list)
 
+def data2df(data):
+    out = {'file': [], 'col': [], 'code': [], 'label': []}
+    for dataset in data.datasets:
+        for idx, row in dataset.df_header.iterrows():
+            codes = [int(l) for l in row['field_names'][1:-1].split(', ')]
+            labels = [valid_types[c] for c in codes]
+            # This is necessary; otherwise 'industry' and 'isbn' are backwards for some reason
+            codes = label_enc.transform(labels)
+            for j in range(len(codes)):
+                out['file'].append(idx)
+                out['col'].append(j)
+                out['code'].append(codes[j])
+                out['label'].append(labels[j])
+    return pd.DataFrame(out)
+
+train_df = data2df(training_data)
+test_df = data2df(testing_data)
+
+train_df.to_csv('train_df.csv', index=False)
 
 print('----------------------------------')
 end_loading = time.time()
@@ -575,6 +593,12 @@ elif args.mode=='eval':
                 y_pred.extend(pred)
                 y_true.extend(labels)
 
+            import pdb; pdb.set_trace()
+            test_df = test_df[:len(y_true)]
+            assert all(test_df['code'] == y_true)
+            test_df['code_pred_sato'] = y_pred
+            test_df['label_pred_sato'] = label_enc.inverse_transform(y_pred)
+            test_df.to_csv('test_df.csv', index=False)
             val_acc = classification_report(y_true, y_pred, output_dict=True)
             print('[Model]')
             print("[Model val acc]: marco avg F1 {}, weighted avg F1 {}".format(val_acc['macro avg']['f1-score'], val_acc['weighted avg']['f1-score']))

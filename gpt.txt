@@ -1,0 +1,5 @@
+Curie model:
+curie:ft-university-of-chicago-2023-04-13-22-35-20
+
+Ada model:
+ada:ft-university-of-chicago-2023-04-13-22-30-17
