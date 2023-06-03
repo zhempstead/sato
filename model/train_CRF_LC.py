@@ -196,9 +196,9 @@ time_record = {}
 def eval_batch(table_batch, label_batch, mask_batch):
     # reshap (table_batch * table_size * features)
     for f_g in table_batch:
-        table_batch[f_g] = table_batch[f_g].view(batch_size * MAX_COL_COUNT, -1)
+        table_batch[f_g] = table_batch[f_g].view(1 * MAX_COL_COUNT, -1)
 
-    emissions = classifier(table_batch).view(batch_size, MAX_COL_COUNT, -1)
+    emissions = classifier(table_batch).view(1, MAX_COL_COUNT, -1)
     pred = model.decode(emissions, mask_batch)
 
     pred = np.concatenate(pred)
@@ -471,7 +471,7 @@ if args.mode == 'train':
             model.eval()
             classifier.eval()
             validation = datasets.generate_batches(testing_data,
-                                                       batch_size=batch_size,
+                                                       batch_size=1,
                                                        shuffle=False, 
                                                        drop_last=True,
                                                        device=device,
@@ -483,10 +483,36 @@ if args.mode == 'train':
                 y_pred.extend(pred)
                 y_true.extend(labels)
 
+            y_true_other = []
+            df_headers = []
+            def fix(code):
+                if code == 40:
+                    return 41
+                elif code == 41:
+                    return 40
+                return code
+            for ds in test_list:
+                df = ds.df_header
+                df['labels'] = None
+                for entry, row in df.iterrows():
+                    codes = [int(c) for c in row['field_names'][1:-1].split(', ')]
+                    codes = [fix(c) for c in codes]
+                    df.loc[entry, 'labels'] = '[' + ', '.join(label_enc.inverse_transform(codes)) + ']'
+                    y_true_other += codes
+                df_headers.append(df)
+            df_header = pd.concat(df_headers)
+            if y_true != y_true_other:
+                import pdb; pdb.set_trace()
+            df_header.to_csv(join(logging_path, "outputs", "test_df.csv"))
+            np.save(join(logging_path, "outputs", 'y_pred_epoch_{}.npy'.format(epoch_idx)), label_enc.inverse_transform(y_pred))
+            np.save(join(logging_path, "outputs", 'y_true.npy'.format(epoch_idx)), label_enc.inverse_transform(y_true))
+       
+
+                
             val_acc = classification_report(y_true, y_pred, output_dict=True)
             writer.add_scalars('marco avg-val', remove_support(val_acc['macro avg']), epoch_idx)
             writer.add_scalars('weighted avg-val', remove_support(val_acc['weighted avg']), epoch_idx)
-        
+ 
         # printing stats
         print("[Train loss]: {}".format(epoch_loss))
         if training_acc:
