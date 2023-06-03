@@ -1,6 +1,12 @@
-
+.env
 *.pyc
 results/
 sherlock/pretrained/
 tmp/
 topic_model/LDA_cache/
+scripts/*.csv
+scripts/output/*
+model/pre_trained
+
+table_data/sato_tables/**
+table_data/viznet_tables/**
