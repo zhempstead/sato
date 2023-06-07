@@ -16,6 +16,8 @@ from tenacity import (
 )  # for exponential backoff
 from prompt_generator import TEMPLATES
 
+import sklearn
+
 STORIES = ['plain', 'game', 'analyst', 'lost']
 
 '''
@@ -40,7 +42,7 @@ def build_chat(prompt_tmp, example, shot_examples=[]):
     chat += [{"role": "user", "content": prompt_tmp.get_prompt(example.to_csv(index=False, header=False))}]
     return chat
 
-@retry(retry=retry_if_exception_type(openai.error.RateLimitError), wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
+@retry(retry=retry_if_exception_type(openai.error.OpenAIError), wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6))
 def raw_response(chat, temp_val, lang='english', timeout=30):
     print("Sending: {}".format(chat))
     response = openai.ChatCompletion.create(
@@ -63,6 +65,7 @@ def response_suffwtemp(prompt_tmp, row1, row2, temp_val, timeout=30):
 
 
 def parse_enresponse(response):
+    response = response.lower()
     out_lst = []
     label_lst = ['city', 'state', 'category', 'class', 'name', 'description', 
                  'type', 'address', 'age', 'club', 'day', 'location', 'status', 
@@ -98,7 +101,25 @@ def parse_enresponse(response):
         out_labels = [o[1] for o in out_lst]
         return out_labels
 
-def storysuff(df, story_name, samp_range : list, samp_type, rows, match_prefix, num_reps=10, shots=0, shot_df=None, uniform_shot_offset=None, outdir='matchwsuff'):
+def explode_df(df):
+    vec_col(df, 'Ground Truth')
+    vec_col(df, 'Story Answer')
+    df['Col No'] = df['Ground Truth'].str.len().apply(lambda cols: range(cols))
+    mismatched = mismatched_length(df)
+    good = df[~mismatched].explode(['Col No', 'Story Answer', 'Ground Truth'], ignore_index=True)
+    bad = df[mismatched].explode(['Col No', 'Ground Truth'], ignore_index=True)
+    bad['Story Answer'] = "N/A"
+    return pd.concat([good, bad])
+
+def vec_col(df, col):
+    df[col] = df[col].str.replace("'", "")
+    df[col] = df[col].str[1:-1]
+    df[col] = df[col].str.split(', ')
+
+def mismatched_length(df):
+    return (df['Story Answer'].str[0] == '') | (df['Story Answer'].str.len() != df['Ground Truth'].str.len())
+
+def storysuff(df, story_name, samp_range : list, samp_type, rows, match_prefix, num_reps=10, shots=0, shot_df=None, uniform_shot_offset=None, outdir='matchwsuff', retry=False):
     '''
     Query chatGPT with the given story on the given rows of the match file at different temperatures,
     repeating each prompt a specified number of times at each temperature.
@@ -154,8 +175,19 @@ def storysuff(df, story_name, samp_range : list, samp_type, rows, match_prefix, 
             for sval in samp_range:
                 outname = outdir / ('-'.join([match_prefix, story_name, str(r_ind), f'rep{i}', f'{samp_type}{str(sval).replace(".", "_")}', f'{shots}shot']) + '.csv')
                 if outname.exists():
-                    print(f"{outname} exists...")
-                    continue
+                    if retry:
+                        df_orig = pd.read_csv(outname)
+                        vec_col(df_orig, 'Ground Truth')
+                        vec_col(df_orig, 'Story Answer')
+                        if any(mismatched_length(df_orig)):
+                            print(f"Retrying {outname}...")
+                        else:
+                            print(f"{outname} exists...")
+                            continue
+                    else:
+                        print(f"{outname} exists...")
+                        continue
+
                 if samp_type == 'temperature':
                     examples = []
                     for i in range(shots):
@@ -286,58 +318,12 @@ def crowd_gather(raw_df, temp, outdir):
     wawa_df.to_csv(outdir + '/Wawa_results' + '-temperature' + str(temp).replace('.', '_') + '.csv', index=False)
     ds_df.to_csv(outdir + '/DawidSkene_results' + '-temperature' + str(temp).replace('.', '_') + '.csv', index=False)
 
+def get_stats_simple(df):
+    macro_f1 = sklearn.metrics.f1_score(df['Ground Truth'], df['Story Answer'], labels=df['Ground Truth'].unique(), average='macro')
+    weighted_f1 = sklearn.metrics.f1_score(df['Ground Truth'], df['Story Answer'], labels=df['Ground Truth'].unique(), average='weighted')
+    return (macro_f1, weighted_f1)
 
-def perprompt_majorities(df, temp, outdir):
-    '''
-    Compute the majority response across iterations for the same prompt.
-
-    Parameters
-    ----------
-    fullfname : TYPE
-        DESCRIPTION.
-    temp : TYPE
-        DESCRIPTION.
-
-    Returns
-    -------
-    None.
-
-    '''
-    tmpdf = df[df['Sampling Param'] == temp]
-    out_schema = ['Match File', 'Row No', 'Prompt', 'Yes Votes', 'No Votes', 'Majority']
-    out_dct = {}
-    for o in out_schema:
-        out_dct[o] = []
-    
-    for prompt in tmpdf['Story Name'].unique().tolist():
-        promptdf = tmpdf[tmpdf['Story Name'] == prompt]
-        for match_file in promptdf['Match File'].unique().tolist():
-            for rowno in promptdf['Row No'].unique().tolist():
-                cand_df = promptdf[(promptdf['Match File'] == match_file) & (promptdf['Row No'] == rowno)]
-                vote_dct = cand_df['Story Answer'].value_counts().to_dict()
-                if 1 in vote_dct:
-                    yesvotes = vote_dct[1]
-                else:
-                    yesvotes = 0
-                
-                if 0 in vote_dct:
-                    novotes = vote_dct[0]
-                else:
-                    novotes = 0
-                othervotes = sum([vote_dct[k] for k in vote_dct if k != 0 and k != 1])
-                out_dct['Match File'].append(match_file)
-                out_dct['Row No'].append(rowno)
-                out_dct['Prompt'].append(prompt)
-                out_dct['Yes Votes'].append(yesvotes)
-                out_dct['No Votes'].append(novotes + othervotes)
-                if yesvotes > (novotes + othervotes):
-                    out_dct['Majority'].append(True)
-                else:
-                    out_dct['Majority'].append(False)
-    
-    out_df = pd.DataFrame(out_dct)
-    out_df.to_csv(outdir + '/per_promptresults_tmperature' + str(temp).replace('.', '_') + '.csv', index=False)
-
+        
 
 def get_stats(method_names, temperatures, story_names, outdir):
     '''
@@ -440,7 +426,7 @@ def query(args):
             rep_row = maindf['num_cols'].to_dict().keys()
             for s in args.stories:
                 print(f"Story {s}")
-                storysuff(maindf, s, args.temps, 'temperature', rep_row, match_prefix, num_reps=num_reps, shots=args.shots, shot_df=traindf, uniform_shot_offset=uniform_shot_offset, outdir=args.rawdir)
+                storysuff(maindf, s, args.temps, 'temperature', rep_row, match_prefix, num_reps=num_reps, shots=args.shots, shot_df=traindf, uniform_shot_offset=uniform_shot_offset, outdir=args.rawdir, retry=args.retry)
 
 
 def combine(args):
@@ -474,11 +460,18 @@ def analyze(args):
     df['Row No'] = df['Row No'].astype(float).astype(int)
     if args.reps is not None:
         df = df[df['Rep No'] <= args.reps]
+    df = explode_df(df)
+    '''
     for temp in args.temps:
         print(f"Temp {temp}:")
         crowd_gather(df, temp, args.outdir)
         perprompt_majorities(df, temp, args.outdir)
     get_stats(["MajorityVote", "Wawa", "DawidSkene"], args.temps, args.stories, args.outdir)
+    '''
+    for story in args.stories:
+        df_story = df[df['Story Name'] == story]
+        macro_f1, weighted_f1 = get_stats_simple(df_story)
+        import pdb; pdb.set_trace()
 
 def retry(args):
     load_dotenv()
@@ -534,6 +527,7 @@ if __name__=='__main__':
     parser_query.add_argument("--uniform-shots", action='store_true')
     parser_query.add_argument("--uniform-shot-offset", type=int, default=0)
     parser_query.add_argument("--rawdir", required=True)
+    parser_query.add_argument("--retry", action="store_true")
     parser_query.set_defaults(func=query)
 
     parser_combine = subparsers.add_parser('combine')

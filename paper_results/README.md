@@ -1,0 +1,3 @@
+- full_df: All rows that appear in the sato_tables dataset
+- full_testset: Same as above, with true answers and sato predictions
+- missing: Expected tables missing from sato_tables dataset
